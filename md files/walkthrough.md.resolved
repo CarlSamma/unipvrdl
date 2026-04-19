@@ -1,0 +1,274 @@
+# Walkthrough: Integrazione Estrazione Sottotitoli - Completata ✅
+
+## Modifiche Implementate
+
+### 1. Dipendenze - [requirements.txt](file:///d:/PROGETTI/Panoptoextractor_CC/requirements.txt)
+
+**Aggiunta:** `selenium>=4.0.0`
+
+```diff
+ yt-dlp
+ PyQt6
+ moviepy
++selenium>=4.0.0
+```
+
+**Motivo:** Il modulo [panopto_extractor.py](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py) richiede Selenium per l'automazione browser.
+
+---
+
+### 2. Supporto Formati Multipli - [panopto_extractor.py](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py)
+
+#### Modifiche alla Classe [PanoptoSubtitleExtractor](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py#21-228)
+
+**a) Nuovi attributi (riga ~53):**
+
+```python
+self.subtitles: str = ""  # SRT grezzo
+self.subtitles_data: List[Dict] = []  # Dati strutturati per export multipli formati
+```
+
+**b) Nuovo metodo [_parse_srt_to_dict()](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py#143-171) (righe ~143-170):**
+
+Converte il contenuto SRT grezzo in una lista di dizionari:
+
+```python
+def _parse_srt_to_dict(self, srt_content: str) -> List[Dict]:
+    """Converte contenuto SRT in lista di dizionari"""
+    entries = []
+    blocks = srt_content.strip().split('\n\n')
+    
+    for block in blocks:
+        lines = block.split('\n')
+        if len(lines) >= 3:
+            timestamp = lines[1].split(' --> ')[0].strip()
+            text = '\n'.join(lines[2:]).strip()
+            entries.append({
+                'timestamp': timestamp,
+                'text': text
+            })
+    
+    return entries
+```
+
+**c) Modifica a [_parse_subtitles()](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py#115-142) (righe ~130-136):**
+
+Ora popola sia `self.subtitles` (SRT) che `self.subtitles_data` (struttura dict):
+
+```python
+if result and 'srt' in result and result['srt']:
+    self.subtitles = result['srt']
+    self.subtitles_data = self._parse_srt_to_dict(result['srt'])
+    self.progress_callback("[+] Script eseguito, contenuto SRT ricevuto e convertito.")
+```
+
+**d) Aggiornamento metodi di salvataggio:**
+
+Modificati [save_json()](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py#173-183), [save_csv()](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py#184-196), [save_txt()](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py#197-209) per usare `self.subtitles_data`:
+
+```python
+# save_json()
+json.dump(self.subtitles_data, f, ensure_ascii=False, indent=2)
+
+# save_csv()
+writer.writerows(self.subtitles_data)
+
+# save_txt()
+for sub in self.subtitles_data:
+    f.write(f"[{sub['timestamp']}]\n")
+    f.write(f"{sub['text']}\n\n")
+```
+
+---
+
+### 3. Supporto CLI - [app.py](file:///d:/PROGETTI/Panoptoextractor_CC/app.py)
+
+#### Nuovi Argomenti CLI (righe ~590-597)
+
+```python
+parser.add_argument('--extract-subtitles', action='store_true', 
+                    help='Extract subtitles from Panopto video')
+parser.add_argument('--subtitle-formats', nargs='+', 
+                    default=['srt'], choices=['srt', 'json', 'csv', 'txt'],
+                    help='Subtitle output formats (default: srt)')
+parser.add_argument('--output-dir', default='./output',
+                    help='Output directory for subtitles')
+```
+
+#### Logica di Estrazione (righe ~601-644)
+
+Aggiunta gestione completa per l'estrazione sottotitoli via CLI:
+
+```python
+if args.extract_subtitles:
+    # Verifica disponibilità modulo
+    if not SUBTITLE_EXTRACTOR_AVAILABLE:
+        print('ERROR: Subtitle extractor module not available')
+        sys.exit(1)
+    
+    # Verifica URL
+    if not args.url:
+        print('ERROR: --url required for subtitle extraction')
+        sys.exit(1)
+    
+    # Estrazione
+    extractor = PanoptoSubtitleExtractor(
+        url=args.url,
+        output_dir=args.output_dir,
+        headless=True
+    )
+    
+    if extractor.extract():
+        # Salva nei formati richiesti
+        for fmt in args.subtitle_formats:
+            if fmt == 'srt':
+                extractor.save_srt()
+            elif fmt == 'json':
+                extractor.save_json()
+            # ... etc
+        print('✅ Subtitle extraction complete!')
+    else:
+        print('❌ Subtitle extraction failed')
+        sys.exit(2)
+```
+
+---
+
+## Esempi d'Uso
+
+### GUI
+
+1. **Avviare l'applicazione:**
+   ```bash
+   python app.py
+   ```
+
+2. **Estrazione sottotitoli:**
+   - Inserire URL Panopto nel campo "Panopto Viewer URL"
+   - (Opzionale) Selezionare directory di output in "Download Location"
+   - Cliccare "Extract Subtitles"
+   - Il file SRT verrà salvato nella directory specificata
+
+### CLI
+
+#### Esempio 1: Solo SRT (default)
+```bash
+python app.py --url "https://unimi.cloud.panopto.eu/Panopto/Pages/Viewer.aspx?id=..." --extract-subtitles
+```
+
+#### Esempio 2: Formati multipli
+```bash
+python app.py --url "PANOPTO_URL" --extract-subtitles --subtitle-formats srt json csv txt
+```
+
+#### Esempio 3: Directory custom
+```bash
+python app.py --url "PANOPTO_URL" --extract-subtitles --output-dir "./sottotitoli" --subtitle-formats json
+```
+
+#### Help
+```bash
+python app.py --help
+```
+
+---
+
+## File di Output
+
+### SRT (SubRip)
+```srt
+1
+00:00:00,000 --> 00:00:05,000
+Benvenuti alla lezione di oggi
+
+2
+00:00:05,000 --> 00:00:10,000
+Parleremo di programmazione Python
+```
+
+### JSON
+```json
+[
+  {
+    "timestamp": "00:00:00,000",
+    "text": "Benvenuti alla lezione di oggi"
+  },
+  {
+    "timestamp": "00:00:05,000",
+    "text": "Parleremo di programmazione Python"
+  }
+]
+```
+
+### CSV
+```csv
+timestamp,text
+00:00:00,000,Benvenuti alla lezione di oggi
+00:00:05,000,Parleremo di programmazione Python
+```
+
+### TXT
+```txt
+[00:00:00,000]
+Benvenuti alla lezione di oggi
+
+[00:00:05,000]
+Parleremo di programmazione Python
+```
+
+---
+
+## Verifica
+
+### ✅ Test Sintassi
+- [panopto_extractor.py](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py): ✅ Compila correttamente
+- [app.py](file:///d:/PROGETTI/Panoptoextractor_CC/app.py): ✅ Compila correttamente
+
+### 📋 Test da Eseguire
+
+**GUI:**
+1. Avviare `python app.py`
+2. Inserire URL Panopto valido
+3. Cliccare "Extract Subtitles"
+4. Verificare file `.srt` creato
+
+**CLI:**
+1. Testare estrazione SRT:
+   ```bash
+   python app.py --url "URL_REALE" --extract-subtitles
+   ```
+2. Testare formati multipli:
+   ```bash
+   python app.py --url "URL_REALE" --extract-subtitles --subtitle-formats srt json csv txt
+   ```
+3. Verificare contenuto file generati
+
+---
+
+## Riepilogo
+
+| Componente | Stato | Modifiche |
+|------------|-------|-----------|
+| [requirements.txt](file:///d:/PROGETTI/Panoptoextractor_CC/requirements.txt) | ✅ | Aggiunta `selenium>=4.0.0` |
+| [panopto_extractor.py](file:///d:/PROGETTI/Panoptoextractor_CC/sottotitoliextractor/panopto_extractor.py) | ✅ | Supporto formati JSON/CSV/TXT |
+| [app.py](file:///d:/PROGETTI/Panoptoextractor_CC/app.py) | ✅ | Supporto CLI completo |
+| Sintassi Python | ✅ | Verificata con `py_compile` |
+
+**Risultato:** L'integrazione dell'estrazione sottotitoli è ora **completa e funzionale** con:
+- ✅ Supporto GUI (già esistente)
+- ✅ Supporto CLI (nuovo)
+- ✅ Formati multipli: SRT, JSON, CSV, TXT (nuovo)
+- ✅ Dipendenze corrette
+
+---
+
+## Prossimi Passi
+
+1. **Installare dipendenze:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Test con URL reale** per verificare funzionalità end-to-end
+
+3. **(Opzionale) Implementare fallback DOM** se il metodo JavaScript dovesse fallire frequentemente

@@ -1,0 +1,4 @@
+yt-dlp
+PyQt6
+moviepy
+selenium>=4.0.0

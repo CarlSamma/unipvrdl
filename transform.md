@@ -20,52 +20,108 @@ Creare `sharepoint/sharepoint_downloader.py` — un modulo dedicato al download 
 
 ```python
 # sharepoint/sharepoint_downloader.py
+# Modulo per il download da SharePoint UniPR
 
 import requests
 import os
+from urllib.parse import unquote, urlparse, parse_qs
 
 SHAREPOINT_HEADERS = {
     "Referer": "https://univpr.sharepoint.com/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
-def resolve_sharepoint_url(site_url: str, server_relative_path: str, cookies_path: str) -> dict:
+def is_stream_url(url: str) -> bool:
+    """Verifica se l'URL è un stream.aspx (web player) e non un URL diretto."""
+    return "stream.aspx" in url.lower()
+
+def extract_server_relative_path_from_stream_url(url: str) -> str:
     """
-    Usa le API REST di SharePoint per ottenere metadati e URL diretto del file.
-    Restituisce: Name, UniqueId, ListId, EncodedAbsUrl
+    Estrae il server-relative path da un URL stream.aspx.
+    Esempio: https://univpr.sharepoint.com/sites/.../_layouts/15/stream.aspx?id=%2Fsites%2F...%2Ffile.mp4
+    → /sites/.../file.mp4
     """
-    api_url = (
-        f"{site_url}/_api/web/GetFileByServerRelativePath"
-        f"(decodedurl='{server_relative_path}')"
-        f"/ListItemAllFields?$select=Id,FileRef,EncodedAbsUrl,FileDirRef"
-    )
-    cookies = load_cookies_netscape(cookies_path)
-    resp = requests.get(api_url, headers=SHAREPOINT_HEADERS, cookies=cookies)
-    resp.raise_for_status()
-    return resp.json().get("d", {})
+    parsed = urlparse(url)
+    query_params = parse_qs(parsed.query)
+    
+    if 'id' in query_params:
+        server_relative = unquote(query_params['id'][0])
+        return server_relative
+    
+    raise ValueError(f"Impossibile estrarre il path dall'URL stream: {url}")
+
+def build_direct_file_url(site_url: str, server_relative_path: str) -> str:
+    """Costruisce l'URL diretto al file MP4 da SharePoint."""
+    encoded_path = server_relative_path.replace(" ", "%20")
+    return f"{site_url.rstrip('/')}{encoded_path}"
+
+def get_direct_url(url: str, cookies_path: str) -> tuple[str, str]:
+    """
+    Converte un URL qualsiasi (stream.aspx o diretto) in un URL diretto MP4.
+    Restituisce: (direct_url, site_url)
+    """
+    if is_stream_url(url):
+        server_relative = extract_server_relative_path_from_stream_url(url)
+        parsed = urlparse(url)
+        site_url = f"{parsed.scheme}://{parsed.netloc}"
+        direct_url = build_direct_file_url(site_url, server_relative)
+        return direct_url, site_url
+    else:
+        parsed = urlparse(url)
+        path_parts = parsed.path.split('/')
+        try:
+            sites_index = path_parts.index('sites')
+            site_path = '/'.join(path_parts[:sites_index + 2])
+            site_url = f"{parsed.scheme}://{parsed.netloc}{site_path}"
+        except ValueError:
+            site_url = f"{parsed.scheme}://{parsed.netloc}"
+        return url, site_url
 
 def download_sharepoint_video(encoded_abs_url: str, cookies_path: str, output_path: str,
                                progress_callback=None) -> str:
     """
     Scarica un MP4 diretto da SharePoint usando i cookie Microsoft 365.
-    Richiede FedAuth, rtFa, ESTSAUTH nel file cookies.txt.
+    Accetta anche URL stream.aspx (web player) e li converte automaticamente.
     """
     cookies = load_cookies_netscape(cookies_path)
-    with requests.get(encoded_abs_url, headers=SHAREPOINT_HEADERS,
+    
+    direct_url, site_url = get_direct_url(encoded_abs_url, cookies_path)
+    
+    with requests.get(direct_url, headers=SHAREPOINT_HEADERS,
                       cookies=cookies, stream=True) as r:
+        if r.status_code == 401:
+            raise Exception("Accesso negato (401). Cookie scaduti o non validi.")
+        if r.status_code == 403:
+            raise Exception("Accesso negato (403). Verifica i permessi sul file.")
+        if r.status_code == 404:
+            raise Exception("File non trovato (404). L'URL potrebbe essere errato.")
         r.raise_for_status()
+        
         total = int(r.headers.get("content-length", 0))
-        downloaded = 0
+        
         with open(output_path, "wb") as f:
+            downloaded = 0
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
                 downloaded += len(chunk)
                 if progress_callback and total:
                     progress_callback(int(downloaded / total * 100))
+        
+        # Verifica che il file non sia HTML
+        if os.path.getsize(output_path) < 10000:
+            with open(output_path, 'rb') as f:
+                start = f.read(500)
+            if start.startswith(b'<!DOCTYPE') or start.startswith(b'<html'):
+                os.remove(output_path)
+                raise Exception("Il file scaricato è HTML. Verifica i cookie e l'accessibilità del video.")
+    
     return output_path
 
 def load_cookies_netscape(path: str) -> dict:
-    """Carica un file cookies.txt in formato Netscape → dict."""
+    """Carica un file cookies.txt in formato Netscape → dict.
+    
+    Formato Netscape: domain | tailmatch | path | secure | expiration | name | value
+    """
     cookies = {}
     with open(path) as f:
         for line in f:
@@ -73,7 +129,7 @@ def load_cookies_netscape(path: str) -> dict:
                 continue
             parts = line.strip().split("\t")
             if len(parts) >= 7:
-                cookies[parts[^5]] = parts[^6]
+                cookies[parts[5]] = parts[6]  # name = index 5, value = index 6
     return cookies
 ```
 
@@ -227,9 +283,6 @@ python app.py --sharepoint-url "https://univpr.sharepoint.com/.../video.mp4" \
 | `app.py` | **MODIFICA** — nuova tab GUI + argomenti CLI SharePoint |
 | `requirements.txt` | **MODIFICA** — aggiunta `requests` |
 | `md files/SHAREPOINT_SUPPORT.md` | **NUOVO** — documentazione |
-
-Vuoi che apra una pull request con queste modifiche direttamente sul repository, oppure preferisci prima rivedere i singoli file?
-
 
 <div align="center">⁂</div>
 

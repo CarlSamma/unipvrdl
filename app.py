@@ -21,7 +21,7 @@ from pathlib import Path
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QCheckBox,
                                  QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                                 QFileDialog, QProgressBar, QTextEdit, QMessageBox)
+                                 QFileDialog, QProgressBar, QTextEdit, QMessageBox, QTabWidget, QGroupBox, QFrame)
     from PyQt6.QtCore import Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QFont, QPalette, QColor
     GUI_AVAILABLE = True
@@ -176,6 +176,85 @@ class AudioExtractionWorker(QThread):
         except Exception as e:
             self.finished.emit(False, f'Error during audio extraction: {str(e)}')
 
+class SharepointDownloadWorker(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, url, cookies_path, output_path, progress_callback=None):
+        super().__init__()
+        self.url = url
+        self.cookies_path = cookies_path
+        self.output_path = output_path
+        self.progress_callback = progress_callback
+
+    def run(self):
+        try:
+            self.progress.emit(f'Starting SharePoint download with yt-dlp...')
+            self.progress.emit(f'URL: {self.url}')
+            self.progress.emit(f'Output: {self.output_path}')
+            
+            # Use yt-dlp for SharePoint downloads - it's more robust for authentication
+            yt_dlp_cmd = self.find_yt_dlp()
+            if not yt_dlp_cmd:
+                raise Exception('yt-dlp not found. Install with "pip install yt-dlp"')
+            
+            out_tpl = self.output_path
+            
+            command = [
+                yt_dlp_cmd,
+                '--cookies', self.cookies_path,
+                '--no-check-certificates',
+                '--format', 'dash-v720p/dash-v480p/dash-v240p/best',
+                self.url,
+                '-o', out_tpl
+            ]
+            
+            self.progress.emit(f'Running: {" ".join(command)}')
+            
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    self.progress.emit(output.strip())
+            
+            rc = process.poll()
+            if rc == 0:
+                self.finished.emit(True, f'Download completed: {self.output_path}')
+            else:
+                self.finished.emit(False, f'Download failed with exit code {rc}')
+                
+        except Exception as e:
+            self.finished.emit(False, f'Error: {str(e)}')
+
+    def find_yt_dlp(self):
+        yt_dlp_cmd = shutil.which('yt-dlp')
+        if yt_dlp_cmd:
+            return yt_dlp_cmd
+        dlp_exe = os.path.join(os.path.dirname(__file__), 'yt-dlp.exe')
+        if os.path.exists(dlp_exe):
+            return dlp_exe
+        try:
+            import site
+            user_site = site.getusersitepackages()
+            scripts_dir = os.path.join(os.path.dirname(user_site), 'Scripts')
+            dlp_exe = os.path.join(scripts_dir, 'yt-dlp.exe')
+            if os.path.exists(dlp_exe):
+                return dlp_exe
+        except:
+            pass
+        return None
+
+
 class SubtitleExtractionWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
@@ -224,8 +303,8 @@ class SubtitleExtractionWorker(QThread):
 class PanoptoDownloaderGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Panopto Video Downloader & Audio Extractor')
-        self.setGeometry(100, 100, 600, 850)
+        self.setWindowTitle('Panoptoextractor_CC')
+        self.setGeometry(100, 100, 700, 750)
 
         # Set modern styling
         self.setStyleSheet("""
@@ -235,6 +314,28 @@ class PanoptoDownloaderGUI(QMainWindow):
             QLabel {
                 color: #333;
                 font-size: 12px;
+            }
+            QTabWidget::pane {
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                background-color: white;
+            }
+            QTabBar::tab {
+                padding: 12px 24px;
+                margin-right: 4px;
+                background-color: #e0e0e0;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background-color: #4CAF50;
+                color: white;
+            }
+            QTabBar::tab:hover {
+                background-color: #45a049;
+                color: white;
             }
             QLineEdit {
                 padding: 8px;
@@ -280,6 +381,19 @@ class PanoptoDownloaderGUI(QMainWindow):
                 border-radius: 5px;
                 font-family: 'Courier New', monospace;
                 font-size: 11px;
+                background-color: #fafafa;
+            }
+            QGroupBox {
+                border: 2px solid #ddd;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
             }
         """)
 
@@ -288,9 +402,38 @@ class PanoptoDownloaderGUI(QMainWindow):
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-        layout.setSpacing(15)
-        layout.setContentsMargins(20, 20, 20, 20)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Create Tab Widget
+        self.tab_widget = QTabWidget()
+        main_layout.addWidget(self.tab_widget)
+
+        # Create Panopto Tab
+        self.create_panopto_tab()
+
+        # Create SharePoint Tab
+        self.create_sharepoint_tab()
+
+        # Common status text area (at bottom)
+        status_label = QLabel('Status:')
+        status_label.setFont(QFont('Arial', 10, QFont.Weight.Bold))
+        main_layout.addWidget(status_label)
+        self.status_text = QTextEdit()
+        self.status_text.setMinimumHeight(100)
+        self.status_text.setReadOnly(True)
+        main_layout.addWidget(self.status_text)
+
+        # Initial status
+        self.status_text.append('Ready. Select a tab and enter your details.')
+
+    def create_panopto_tab(self):
+        """Create the Panopto Download tab content"""
+        panopto_widget = QWidget()
+        layout = QVBoxLayout(panopto_widget)
+        layout.setSpacing(12)
+        layout.setContentsMargins(15, 15, 15, 15)
 
         # URL input
         url_layout = QVBoxLayout()
@@ -347,9 +490,9 @@ class PanoptoDownloaderGUI(QMainWindow):
         layout.addLayout(output_layout)
 
         # Download button
-        self.download_btn = QPushButton('Start Download')
+        self.download_btn = QPushButton('⬇ Download Video')
         self.download_btn.clicked.connect(self.start_download)
-        self.download_btn.setMinimumHeight(40)
+        self.download_btn.setMinimumHeight(45)
         layout.addWidget(self.download_btn)
 
         # Progress bar
@@ -357,22 +500,13 @@ class PanoptoDownloaderGUI(QMainWindow):
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 
-        # Status text area
-        status_label = QLabel('Status:')
-        status_label.setFont(QFont('Arial', 10, QFont.Weight.Bold))
-        layout.addWidget(status_label)
-        self.status_text = QTextEdit()
-        self.status_text.setMinimumHeight(150)
-        self.status_text.setReadOnly(True)
-        layout.addWidget(self.status_text)
+        # Add separator
+        layout.addWidget(HSeparator())
 
         # Audio extraction section
-        audio_layout = QVBoxLayout()
-        audio_label = QLabel('Audio Extraction:')
-        audio_label.setFont(QFont('Arial', 10, QFont.Weight.Bold))
-        audio_layout.addWidget(audio_label)
+        audio_group = QGroupBox('Audio Extraction')
+        audio_layout = QVBoxLayout(audio_group)
 
-        # Video file selection for audio extraction
         video_file_layout = QHBoxLayout()
         video_label = QLabel('Video File:')
         self.video_input = QLineEdit()
@@ -386,51 +520,131 @@ class PanoptoDownloaderGUI(QMainWindow):
         video_file_layout.addWidget(video_browse_btn)
         audio_layout.addLayout(video_file_layout)
 
-        # Audio output filename (optional)
         audio_output_layout = QVBoxLayout()
         audio_output_label = QLabel('Audio Output Filename (optional):')
-        audio_output_label.setFont(QFont('Arial', 10, QFont.Weight.Bold))
         self.audio_output_input = QLineEdit()
         self.audio_output_input.setPlaceholderText('Leave empty for auto-generated name')
         audio_output_layout.addWidget(audio_output_label)
         audio_output_layout.addWidget(self.audio_output_input)
         audio_layout.addLayout(audio_output_layout)
 
-        # Extract audio button
-        self.extract_audio_btn = QPushButton('Extract Audio')
+        self.extract_audio_btn = QPushButton('🎵 Extract Audio')
         self.extract_audio_btn.clicked.connect(self.start_audio_extraction)
         self.extract_audio_btn.setMinimumHeight(40)
         audio_layout.addWidget(self.extract_audio_btn)
 
-        layout.addLayout(audio_layout)
+        layout.addWidget(audio_group)
 
-        # --- Subtitle Extraction Section ---
+        # Subtitle Extraction Section
         if SUBTITLE_EXTRACTOR_AVAILABLE:
-            subtitle_layout = QVBoxLayout()
-            subtitle_label = QLabel('Subtitle Extraction:')
-            subtitle_label.setFont(QFont('Arial', 10, QFont.Weight.Bold))
-            subtitle_layout.addWidget(subtitle_label)
+            subtitle_group = QGroupBox('Subtitle Extraction')
+            subtitle_layout = QVBoxLayout(subtitle_group)
 
-            # Note: The new JS-based extractor only produces SRT.
-            # The format options are removed to reflect this.
-            info_label = QLabel("This will extract subtitles into a <b>.srt</b> file.")
+            info_label = QLabel("Extract subtitles into <b>.srt</b> file.")
             info_label.setFont(QFont('Arial', 9))
             subtitle_layout.addWidget(info_label)
 
-
-            # Extract subtitles button
-            self.extract_subtitle_btn = QPushButton('Extract Subtitles')
+            self.extract_subtitle_btn = QPushButton('📝 Extract Subtitles')
             self.extract_subtitle_btn.clicked.connect(self.start_subtitle_extraction)
             self.extract_subtitle_btn.setMinimumHeight(40)
             subtitle_layout.addWidget(self.extract_subtitle_btn)
 
-            layout.addLayout(subtitle_layout)
+            layout.addWidget(subtitle_group)
         else:
-            subtitle_warning = QLabel('Subtitle extractor module not found. Please ensure `sottotitoliextractor` is available.')
+            subtitle_warning = QLabel('⚠ Subtitle extractor module not found.')
             layout.addWidget(subtitle_warning)
 
-        # Initial status
-        self.status_text.append('Ready to download videos or extract audio from existing files.')
+        layout.addStretch()
+        self.tab_widget.addTab(panopto_widget, '🎬 Panopto Download')
+
+    def create_sharepoint_tab(self):
+        """Create the SharePoint UniPR tab content"""
+        sharepoint_widget = QWidget()
+        layout = QVBoxLayout(sharepoint_widget)
+        layout.setSpacing(12)
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        # Info label
+        info_label = QLabel('Download videos directly from SharePoint UniPR. Use the cookies exported from your Microsoft 365 session.')
+        info_label.setFont(QFont('Arial', 9))
+        info_label.setStyleSheet('color: #666; background-color: #fffde7; padding: 8px; border-radius: 5px;')
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        # SharePoint URL input
+        sp_url_layout = QVBoxLayout()
+        sp_url_label = QLabel('SharePoint Video URL:')
+        sp_url_label.setFont(QFont('Arial', 10, QFont.Weight.Bold))
+        self.sp_url_input = QLineEdit()
+        self.sp_url_input.setPlaceholderText('https://univpr.sharepoint.com/.../video.mp4')
+        sp_url_layout.addWidget(sp_url_label)
+        sp_url_layout.addWidget(self.sp_url_input)
+        layout.addLayout(sp_url_layout)
+
+        # SharePoint cookie file
+        sp_cookie_layout = QVBoxLayout()
+        sp_cookie_label = QLabel('Cookies File (Microsoft 365):')
+        sp_cookie_label.setFont(QFont('Arial', 10, QFont.Weight.Bold))
+        sp_cookie_row = QHBoxLayout()
+        self.sp_cookie_input = QLineEdit()
+        self.sp_cookie_input.setPlaceholderText('Select cookies.txt file...')
+        self.sp_cookie_input.setReadOnly(True)
+        sp_cookie_browse_btn = QPushButton('Browse...')
+        sp_cookie_browse_btn.setObjectName('browseBtn')
+        sp_cookie_browse_btn.clicked.connect(self.browse_sp_cookie)
+        sp_cookie_row.addWidget(self.sp_cookie_input)
+        sp_cookie_row.addWidget(sp_cookie_browse_btn)
+        sp_cookie_layout.addWidget(sp_cookie_label)
+        sp_cookie_layout.addLayout(sp_cookie_row)
+        layout.addLayout(sp_cookie_layout)
+
+        # SharePoint output directory
+        sp_out_layout = QVBoxLayout()
+        sp_out_label = QLabel('Output Directory:')
+        sp_out_label.setFont(QFont('Arial', 10, QFont.Weight.Bold))
+        sp_out_row = QHBoxLayout()
+        self.sp_out_input = QLineEdit()
+        self.sp_out_input.setPlaceholderText('Select output directory...')
+        self.sp_out_input.setReadOnly(True)
+        sp_out_browse_btn = QPushButton('Browse...')
+        sp_out_browse_btn.setObjectName('browseBtn')
+        sp_out_browse_btn.clicked.connect(self.browse_sp_output)
+        sp_out_row.addWidget(self.sp_out_input)
+        sp_out_row.addWidget(sp_out_browse_btn)
+        sp_out_layout.addWidget(sp_out_label)
+        sp_out_layout.addLayout(sp_out_row)
+        layout.addLayout(sp_out_layout)
+
+        # SharePoint download button
+        self.sp_download_btn = QPushButton('⬇ Download from SharePoint')
+        self.sp_download_btn.clicked.connect(self.start_sp_download)
+        self.sp_download_btn.setMinimumHeight(50)
+        self.sp_download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+            QPushButton:pressed {
+                background-color: #E65100;
+            }
+        """)
+        layout.addWidget(self.sp_download_btn)
+
+        # Note about cookie format
+        cookie_note = QLabel('ℹ Cookie format: Netscape (export from "Get cookies.txt LOCALLY" extension)')
+        cookie_note.setFont(QFont('Arial', 8))
+        cookie_note.setStyleSheet('color: #888;')
+        layout.addWidget(cookie_note)
+
+        layout.addStretch()
+        self.tab_widget.addTab(sharepoint_widget, '📁 SharePoint UniPR')
+
+    def update_progress(self, message):
+        self.status_text.append(message)
+        scrollbar = self.status_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def browse_cookies(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -464,25 +678,17 @@ class PanoptoDownloaderGUI(QMainWindow):
             QMessageBox.warning(self, 'Error', 'Cookies file does not exist.')
             return
 
-        # Disable download button and show progress
         self.download_btn.setEnabled(False)
         self.download_btn.setText('Downloading...')
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate progress
+        self.progress_bar.setRange(0, 0)
         self.status_text.clear()
         self.status_text.append('Starting download...')
 
-        # Start download in separate thread
         self.worker = DownloadWorker(url, cookies_path, output_name, '', download_location if download_location else None)
         self.worker.progress.connect(self.update_progress)
         self.worker.finished.connect(self.download_finished)
         self.worker.start()
-
-    def update_progress(self, message):
-        self.status_text.append(message)
-        # Scroll to bottom
-        scrollbar = self.status_text.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
 
     def browse_video(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -503,15 +709,13 @@ class PanoptoDownloaderGUI(QMainWindow):
             QMessageBox.warning(self, 'Error', 'Video file does not exist.')
             return
 
-        # Disable extract audio button and show progress
         self.extract_audio_btn.setEnabled(False)
         self.extract_audio_btn.setText('Extracting Audio...')
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate progress
+        self.progress_bar.setRange(0, 0)
         self.status_text.clear()
         self.status_text.append('Starting audio extraction...')
 
-        # Start audio extraction in separate thread
         self.audio_worker = AudioExtractionWorker(video_path, audio_output if audio_output else None)
         self.audio_worker.progress.connect(self.update_progress)
         self.audio_worker.finished.connect(self.audio_extraction_finished)
@@ -520,15 +724,13 @@ class PanoptoDownloaderGUI(QMainWindow):
     def start_subtitle_extraction(self):
         url = self.url_input.text().strip()
         download_location = self.download_location_input.text().strip() or '.'
-        cookies_path = self.cookies_input.text().strip()  # Usa lo stesso file cookie del download
+        cookies_path = self.cookies_input.text().strip()
 
         if not url:
             QMessageBox.warning(self, 'Error', 'Please enter a Panopto URL for subtitle extraction.')
             return
 
-        # The new extractor only supports SRT, so we hardcode it.
         selected_formats = ['srt']
-        # Disable button and show progress
         self.extract_subtitle_btn.setEnabled(False)
         self.extract_subtitle_btn.setText('Extracting Subtitles...')
         self.progress_bar.setVisible(True)
@@ -536,8 +738,6 @@ class PanoptoDownloaderGUI(QMainWindow):
         self.status_text.clear()
         self.status_text.append('Starting subtitle extraction...')
 
-        # Start subtitle extraction in a separate thread
-        # Passa cookies_path se fornito (video protetti richiedono autenticazione)
         self.subtitle_worker = SubtitleExtractionWorker(
             url, 
             download_location, 
@@ -551,7 +751,7 @@ class PanoptoDownloaderGUI(QMainWindow):
     def subtitle_extraction_finished(self, success, message):
         self.progress_bar.setVisible(False)
         self.extract_subtitle_btn.setEnabled(True)
-        self.extract_subtitle_btn.setText('Extract Subtitles')
+        self.extract_subtitle_btn.setText('📝 Extract Subtitles')
 
         if success:
             QMessageBox.information(self, 'Success', message)
@@ -560,11 +760,10 @@ class PanoptoDownloaderGUI(QMainWindow):
             QMessageBox.critical(self, 'Error', message)
             self.status_text.append(f'\n❌ {message}')
 
-
     def audio_extraction_finished(self, success, message):
         self.progress_bar.setVisible(False)
         self.extract_audio_btn.setEnabled(True)
-        self.extract_audio_btn.setText('Extract Audio')
+        self.extract_audio_btn.setText('🎵 Extract Audio')
 
         if success:
             QMessageBox.information(self, 'Success', message)
@@ -576,7 +775,7 @@ class PanoptoDownloaderGUI(QMainWindow):
     def download_finished(self, success, message):
         self.progress_bar.setVisible(False)
         self.download_btn.setEnabled(True)
-        self.download_btn.setText('Start Download')
+        self.download_btn.setText('⬇ Download Video')
 
         if success:
             QMessageBox.information(self, 'Success', message)
@@ -584,6 +783,81 @@ class PanoptoDownloaderGUI(QMainWindow):
         else:
             QMessageBox.critical(self, 'Error', message)
             self.status_text.append(f'\n❌ {message}')
+
+    def browse_sp_cookie(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 'Select Cookies File', '', 'Text files (*.txt);;All files (*.*)'
+        )
+        if file_path:
+            self.sp_cookie_input.setText(file_path)
+
+    def browse_sp_output(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, 'Select Output Directory', ''
+        )
+        if directory:
+            self.sp_out_input.setText(directory)
+
+    def start_sp_download(self):
+        url = self.sp_url_input.text().strip()
+        cookies_path = self.sp_cookie_input.text().strip()
+        out_dir = self.sp_out_input.text().strip() or '.'
+
+        if not url:
+            QMessageBox.warning(self, 'Error', 'Please enter a SharePoint URL.')
+            return
+
+        if not cookies_path:
+            QMessageBox.warning(self, 'Error', 'Please select a cookies file.')
+            return
+
+        if not os.path.exists(cookies_path):
+            QMessageBox.warning(self, 'Error', 'Cookies file does not exist.')
+            return
+
+        filename = url.split("/")[-1].split("?")[0]
+        if not filename.endswith('.mp4'):
+            filename += '.mp4'
+        output_path = os.path.join(out_dir, filename)
+
+        self.sp_download_btn.setEnabled(False)
+        self.sp_download_btn.setText('Downloading...')
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.status_text.clear()
+        self.status_text.append('Starting SharePoint download...')
+
+        self.sp_worker = SharepointDownloadWorker(
+            url, cookies_path, output_path,
+            progress_callback=self.sp_progress
+        )
+        self.sp_worker.progress.connect(self.update_progress)
+        self.sp_worker.finished.connect(self.sp_download_finished)
+        self.sp_worker.start()
+
+    def sp_progress(self, value):
+        self.progress_bar.setValue(value)
+
+    def sp_download_finished(self, success, message):
+        self.progress_bar.setVisible(False)
+        self.sp_download_btn.setEnabled(True)
+        self.sp_download_btn.setText('⬇ Download from SharePoint')
+
+        if success:
+            QMessageBox.information(self, 'Success', message)
+            self.status_text.append(f'\n✅ {message}')
+        else:
+            QMessageBox.critical(self, 'Error', message)
+            self.status_text.append(f'\n❌ {message}')
+
+
+class HSeparator(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.HLine)
+        self.setStyleSheet('background-color: #ddd; margin: 5px 0;')
+
 
 def cli_main():
     parser = argparse.ArgumentParser(description='Panopto Video Downloader & Audio Extractor')
@@ -605,7 +879,55 @@ def cli_main():
     parser.add_argument('--output-dir', default='./output',
                         help='Output directory for subtitles')
     
+    # SharePoint UniPR arguments
+    parser.add_argument('--sharepoint-url', 
+                        help='SharePoint direct MP4 URL (UniPR)')
+    parser.add_argument('--site-url', 
+                        help='SharePoint site URL (for API resolution)')
+    parser.add_argument('--server-relative-path',
+                        help='ServerRelativePath of file on SharePoint')
+    
     args = parser.parse_args()
+
+    # SharePoint download mode
+    if args.sharepoint_url:
+        if not args.cookies:
+            print('ERROR: --cookies required for SharePoint download')
+            sys.exit(1)
+        
+        # Use yt-dlp for SharePoint - it's more robust for Microsoft 365 authentication
+        yt_dlp_cmd = shutil.which('yt-dlp')
+        if not yt_dlp_cmd:
+            dlp_exe = os.path.join(os.path.dirname(__file__), 'yt-dlp.exe')
+            if os.path.exists(dlp_exe):
+                yt_dlp_cmd = dlp_exe
+        
+        if not yt_dlp_cmd:
+            print('ERROR: yt-dlp not found. Install with "pip install yt-dlp"')
+            sys.exit(1)
+        
+        output_path = args.output or os.path.basename(args.sharepoint_url.split("?")[0])
+        print(f'Downloading from SharePoint: {args.sharepoint_url}')
+        print(f'Output: {output_path}')
+        
+        command = [
+            yt_dlp_cmd,
+            '--cookies', args.cookies,
+            '--no-check-certificates',
+            '--format', 'dash-v720p/dash-v480p/dash-v240p/best',
+            args.sharepoint_url,
+            '-o', output_path
+        ]
+        
+        print(f'Running: {" ".join(command)}')
+        try:
+            subprocess.run(command, check=True)
+            print(f'\n✅ Download complete! Saved to: {output_path}')
+        except subprocess.CalledProcessError as e:
+            print(f'\n❌ Download failed: {str(e)}')
+            sys.exit(2)
+        
+        return
 
     # Subtitle extraction mode
     if args.extract_subtitles:
